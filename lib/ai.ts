@@ -36,7 +36,7 @@ export interface InsightsResult {
   recentNewsSummary: string
 }
 
-const MODEL = 'claude-sonnet-4-5'
+const MODEL = 'claude-3-5-haiku-20241022'
 
 const ProfileSchema = z.object({
   industry: z.string(),
