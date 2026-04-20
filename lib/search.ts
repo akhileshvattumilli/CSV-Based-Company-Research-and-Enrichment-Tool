@@ -18,7 +18,7 @@ interface SerperSearchResponse {
   organic?: SerperOrganicItem[]
 }
 
-const SERPER_ENDPOINT = 'https://api.serper.dev/search'
+const SERPER_ENDPOINT = 'https://google.serper.dev/search'
 const MAX_RESULTS = 5
 
 export async function search(companyName: string): Promise<SearchResponse> {
@@ -31,7 +31,7 @@ export async function search(companyName: string): Promise<SearchResponse> {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-API-Key': apiKey,
+      'X-API-KEY': apiKey,
     },
     body: JSON.stringify({ q: companyName }),
   })

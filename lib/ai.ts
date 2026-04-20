@@ -36,7 +36,7 @@ export interface InsightsResult {
   recentNewsSummary: string
 }
 
-const MODEL = 'claude-sonnet-4-20250514'
+const MODEL = 'claude-sonnet-4-5'
 
 const ProfileSchema = z.object({
   industry: z.string(),
@@ -73,12 +73,25 @@ function extractText(message: Anthropic.Message): string {
   return parts.join('').trim()
 }
 
+function stripJsonFences(raw: string): string {
+  let text = raw.trim()
+  const fenceMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fenceMatch) text = fenceMatch[1].trim()
+  const firstBrace = text.indexOf('{')
+  const lastBrace = text.lastIndexOf('}')
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    text = text.slice(firstBrace, lastBrace + 1)
+  }
+  return text
+}
+
 function parseJson<T>(raw: string, context: string): T {
+  const cleaned = stripJsonFences(raw)
   try {
-    return JSON.parse(raw) as T
+    return JSON.parse(cleaned) as T
   } catch (error) {
     throw new Error(
-      `Failed to parse ${context} JSON response: ${(error as Error).message}. Raw: ${raw.slice(0, 200)}`,
+      `Failed to parse ${context} JSON response: ${(error as Error).message}. Raw: ${raw.slice(0, 300)}`,
     )
   }
 }
