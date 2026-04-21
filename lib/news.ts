@@ -2,10 +2,21 @@ export interface NewsArticle {
   title: string
   publishedAt: string
   description: string
+  source?: string
 }
 
 export interface NewsResult {
   articles: NewsArticle[]
+}
+
+function noNewsPlaceholder(companyName: string): NewsArticle {
+  return {
+    title: `No recent news found for ${companyName}`,
+    publishedAt: new Date().toISOString(),
+    description:
+      'Claude will analyze company position and recent developments based on website content',
+    source: 'Claude (backup analysis)',
+  }
 }
 
 interface GNewsArticle {
@@ -104,6 +115,10 @@ export async function getNews(companyName: string): Promise<NewsResult> {
     publishedAt: article.publishedAt ?? '',
     description: article.description ?? '',
   }))
+
+  if (articles.length === 0) {
+    return { articles: [noNewsPlaceholder(companyName)] }
+  }
 
   return { articles }
 }

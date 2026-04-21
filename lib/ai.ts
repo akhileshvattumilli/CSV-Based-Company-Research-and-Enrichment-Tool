@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { z } from 'zod'
 import type { ScrapeResult } from './scrape'
 import type { SearchResponse } from './search'
-import type { NewsResult } from './news'
+import type { NewsArticle } from './news'
 
 export interface ProfileInput {
   companyName: string
@@ -23,7 +23,8 @@ export interface ProfileResult {
 export interface InsightsInput {
   companyName: string
   profile: ProfileResult
-  news: NewsResult
+  newsArticles: NewsArticle[]
+  hasRealNews: boolean
 }
 
 export interface InsightsResult {
@@ -38,23 +39,25 @@ export interface InsightsResult {
 
 const MODEL = 'claude-haiku-4-5'
 
+const FALLBACK = 'Unavailable'
+
 const ProfileSchema = z.object({
-  industry: z.string(),
-  subIndustry: z.string(),
-  primaryProduct: z.string(),
-  targetCustomer: z.string(),
-  estimatedSize: z.string(),
-  keyOffering: z.string(),
+  industry: z.string().optional().default(FALLBACK),
+  subIndustry: z.string().optional().default(FALLBACK),
+  primaryProduct: z.string().optional().default(FALLBACK),
+  targetCustomer: z.string().optional().default(FALLBACK),
+  estimatedSize: z.string().optional().default(FALLBACK),
+  keyOffering: z.string().optional().default(FALLBACK),
 })
 
 const InsightsSchema = z.object({
-  salesAngle1: z.string(),
-  salesAngle2: z.string(),
-  salesAngle3: z.string(),
-  riskSignal1: z.string(),
-  riskSignal2: z.string(),
-  riskSignal3: z.string(),
-  recentNewsSummary: z.string(),
+  salesAngle1: z.string().optional().default(FALLBACK),
+  salesAngle2: z.string().optional().default(FALLBACK),
+  salesAngle3: z.string().optional().default(FALLBACK),
+  riskSignal1: z.string().optional().default(FALLBACK),
+  riskSignal2: z.string().optional().default(FALLBACK),
+  riskSignal3: z.string().optional().default(FALLBACK),
+  recentNewsSummary: z.string().optional().default(FALLBACK),
 })
 
 let cachedClient: Anthropic | null = null
@@ -161,17 +164,21 @@ Respond with ONLY a single valid JSON object, no prose, no markdown fences, no c
 }
 
 export async function generateInsights(input: InsightsInput): Promise<InsightsResult> {
-  const { companyName, profile, news } = input
+  const { companyName, profile, newsArticles, hasRealNews } = input
 
   const newsBlock =
-    news.articles.length > 0
-      ? news.articles
+    newsArticles.length > 0
+      ? newsArticles
           .map(
             (a, i) =>
-              `${i + 1}. [${a.publishedAt}] ${a.title}\n   ${a.description}`,
+              `${i + 1}. [${a.publishedAt}] ${a.title}${a.source ? ` (source: ${a.source})` : ''}\n   ${a.description}`,
           )
           .join('\n')
       : '(no recent news articles retrieved)'
+
+  const newsGuidance = hasRealNews
+    ? `Use the provided news articles to inform your sales angles and risk signals analysis. For "recentNewsSummary", pick the most sales-relevant signal (not just the most recent) and describe its concrete implication for a seller in one sentence.`
+    : `No real news articles were found. Infer recent developments and market trends from the company profile and website content instead. Still generate 3 specific sales angles and 3 risk signals based on their industry, company size, technology stack, and market position. For "recentNewsSummary", do NOT say "No recent news available" â€” instead, write a single sentence summarizing the company's likely current position and near-term trajectory inferred from their profile, and END the sentence with " (Based on website analysis and market position)".`
 
   const userMessage = `You are a senior sales strategist preparing an outbound playbook for ${companyName}. A rep is about to pitch this account and needs sharp, specific, evidence-grounded insights they can actually use on a call today.
 
@@ -210,7 +217,7 @@ Each risk must be a CONCRETE, real threat specific to this company's situation â
 Avoid generic warnings like "economic downturn could hurt them" or "must keep innovating". Tie each risk to their industry, size, stage, or news. Each of the three risks must address a DIFFERENT category.
 
 --- RECENT NEWS SUMMARY ---
-One sentence, concrete, mentions the SPECIFIC signal and its implication for a seller. If there are articles, synthesize the most sales-relevant one (not just the most recent). If no articles, write exactly: "No recent news available."
+${newsGuidance}
 
 === OUTPUT FORMAT ===
 Respond with ONLY a single valid JSON object, no prose, no markdown fences, no commentary. Use this exact shape:
@@ -235,6 +242,17 @@ Respond with ONLY a single valid JSON object, no prose, no markdown fences, no c
   })
 
   const raw = extractText(message)
-  const json = parseJson<unknown>(raw, 'generateInsights')
-  return InsightsSchema.parse(json)
+  console.log('Raw generateInsights response:', raw)
+
+  const parsed = parseJson<unknown>(raw, 'generateInsights')
+  const result = InsightsSchema.safeParse(parsed)
+  if (!result.success) {
+    console.error(
+      'generateInsights validation failed:',
+      JSON.stringify(parsed),
+      result.error.flatten(),
+    )
+    return InsightsSchema.parse({})
+  }
+  return result.data
 }
