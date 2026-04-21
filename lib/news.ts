@@ -23,6 +23,52 @@ interface GNewsResponse {
 const GNEWS_API_URL = 'https://gnews.io/api/v4/search'
 const MAX_ARTICLES = 5
 
+const MAX_RETRIES = 3
+const BASE_DELAY_MS = 600
+const INITIAL_JITTER_MS = 1200
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function fetchWithRetry(url: string): Promise<Response> {
+  await sleep(Math.random() * INITIAL_JITTER_MS)
+
+  let attempt = 0
+  let lastError: unknown
+  let lastResponseBody = ''
+  let lastStatus = 0
+  let lastStatusText = ''
+
+  while (attempt <= MAX_RETRIES) {
+    try {
+      const response = await fetch(url, { method: 'GET' })
+
+      if (response.status !== 429 && response.status !== 503) {
+        return response
+      }
+
+      lastStatus = response.status
+      lastStatusText = response.statusText
+      lastResponseBody = await response.text().catch(() => '')
+    } catch (error) {
+      lastError = error
+    }
+
+    if (attempt === MAX_RETRIES) break
+
+    const backoff = BASE_DELAY_MS * Math.pow(2, attempt)
+    const jitter = Math.random() * BASE_DELAY_MS
+    await sleep(backoff + jitter)
+    attempt += 1
+  }
+
+  if (lastError) throw lastError
+  throw new Error(
+    `GNews request failed (${lastStatus} ${lastStatusText}) after ${MAX_RETRIES + 1} attempts: ${lastResponseBody}`,
+  )
+}
+
 export async function getNews(companyName: string): Promise<NewsResult> {
   const apiKey = process.env.GNEWS_API_KEY
   if (!apiKey) {
@@ -36,9 +82,7 @@ export async function getNews(companyName: string): Promise<NewsResult> {
     apikey: apiKey,
   })
 
-  const response = await fetch(`${GNEWS_API_URL}?${params.toString()}`, {
-    method: 'GET',
-  })
+  const response = await fetchWithRetry(`${GNEWS_API_URL}?${params.toString()}`)
 
   if (!response.ok) {
     const body = await response.text()
