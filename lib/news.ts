@@ -8,56 +8,49 @@ export interface NewsResult {
   articles: NewsArticle[]
 }
 
-interface NewsApiArticle {
+interface GNewsArticle {
   title?: string | null
   publishedAt?: string | null
   description?: string | null
 }
 
-interface NewsApiResponse {
-  status?: string
-  articles?: NewsApiArticle[]
-  totalResults?: number
-  code?: string
-  message?: string
+interface GNewsResponse {
+  totalArticles?: number
+  articles?: GNewsArticle[]
+  errors?: string[]
 }
 
-const NEWS_API_URL = 'https://newsapi.org/v2/everything'
+const GNEWS_API_URL = 'https://gnews.io/api/v4/search'
 const MAX_ARTICLES = 5
 
 export async function getNews(companyName: string): Promise<NewsResult> {
-  const apiKey = process.env.NEWS_API_KEY
+  const apiKey = process.env.GNEWS_API_KEY
   if (!apiKey) {
-    throw new Error('NEWS_API_KEY is not set')
+    throw new Error('GNEWS_API_KEY is not set')
   }
 
   const params = new URLSearchParams({
     q: companyName,
-    sortBy: 'publishedAt',
-    language: 'en',
-    pageSize: String(MAX_ARTICLES),
+    lang: 'en',
+    max: String(MAX_ARTICLES),
+    apikey: apiKey,
   })
 
-  const response = await fetch(`${NEWS_API_URL}?${params.toString()}`, {
+  const response = await fetch(`${GNEWS_API_URL}?${params.toString()}`, {
     method: 'GET',
-    headers: {
-      'X-Api-Key': apiKey,
-    },
   })
 
   if (!response.ok) {
     const body = await response.text()
     throw new Error(
-      `NewsAPI request failed (${response.status} ${response.statusText}): ${body}`,
+      `GNews request failed (${response.status} ${response.statusText}): ${body}`,
     )
   }
 
-  const data = (await response.json()) as NewsApiResponse
+  const data = (await response.json()) as GNewsResponse
 
-  if (data.status && data.status !== 'ok') {
-    throw new Error(
-      `NewsAPI returned error: ${data.code ?? 'unknown'} - ${data.message ?? 'unknown error'}`,
-    )
+  if (Array.isArray(data.errors) && data.errors.length > 0) {
+    throw new Error(`GNews returned error: ${data.errors.join(', ')}`)
   }
 
   const rawArticles = Array.isArray(data.articles) ? data.articles : []
