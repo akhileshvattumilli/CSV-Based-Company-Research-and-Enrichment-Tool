@@ -9,7 +9,7 @@
 
 **Goal:** Accept a CSV of companies, enrich each using multiple external data sources + multi-step AI processing, and email the enriched CSV back to the user.
 
-**Stack:** Next.js (TypeScript) · Deployed on Vercel · Claude API · Firecrawl · Serper · NewsAPI · Resend
+**Stack:** Next.js (TypeScript) · Deployed on Vercel · Claude API (Haiku 4.5) · Firecrawl · Serper · GNews · Resend
 
 ---
 
@@ -37,7 +37,7 @@ enrichRow(company) — lib/enrichRow.ts
   - Orchestrates one company's full pipeline:
     1. scrape(website)        → lib/scrape.ts     → Firecrawl API
     2. search(companyName)    → lib/search.ts     → Serper API
-    3. getNews(companyName)   → lib/news.ts       → NewsAPI
+    3. getNews(companyName)   → lib/news.ts       → GNews API
     4. extractProfile(...)    → lib/ai.ts (Call 1) → Claude API
     5. generateInsights(...)  → lib/ai.ts (Call 2) → Claude API
   - Returns a fully enriched row object
@@ -114,16 +114,16 @@ enrichRow(company) — lib/enrichRow.ts
 
 ---
 
-### D-006 · External Data Source 2: NewsAPI
+### D-006 · External Data Source 2: GNews (migrated from NewsAPI)
 
-**Decision:** Use NewsAPI as the second required external data source.
+**Decision:** Use GNews (`https://gnews.io/api/v4/search`) as the second required external data source. Originally NewsAPI was planned, but we migrated to GNews for better coverage of smaller/B2B companies and a simpler free tier.
 
 **Reasoning:**
-- Required output column `Recent News Summary` maps directly to what NewsAPI provides.
-- Returns recent news articles about any company by name or domain.
-- Free developer tier allows 100 requests/day — sufficient for the assignment.
+- Required output column `Recent News Summary` maps directly to what a news API provides.
+- Returns recent news articles about any company by name.
+- Free tier (100 req/day) is sufficient for a 10-row CSV.
 - Provides concrete, time-stamped signals (funding rounds, layoffs, product launches, regulatory issues) which directly power the `Risk Signal` and `Sales Angle` outputs.
-- Note: `Data Sources Used` column logs which APIs returned real data (e.g., some small companies may have no news hits — this is handled gracefully with a fallback message).
+- `Data Sources Used` column logs which APIs returned real data. Small/unknown companies often have no news hits — handled gracefully via a placeholder article (see D-006a).
 
 ---
 
@@ -169,11 +169,26 @@ enrichRow(company) — lib/enrichRow.ts
   ```
 - Reasoning: This call does generation/synthesis. It receives clean structured input (not raw scrape text), which reduces hallucination risk and improves output quality.
 
-**Model:** `claude-sonnet-4-20250514`
-- Best balance of speed and quality for structured extraction tasks.
-- Faster and cheaper than Opus, more reliable than Haiku for structured JSON output.
+**Model:** `claude-haiku-4-5`
+- Cheapest + fastest Claude model, which is what this workload actually needs — both calls are structured JSON generation from clean inputs, not long-horizon reasoning.
+- Earlier iterations used `claude-sonnet-4-20250514` and `claude-3-5-sonnet-20241022`; both were dropped after testing showed Haiku 4.5 produced equivalent quality on the structured profile + insights outputs at a fraction of the token cost and latency. Deprecated/invalid model IDs (e.g. `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`) returned 404s during migration and were replaced with current slugs.
+- `max_tokens: 2048` for both calls to fit the longer, more detailed insight prompts.
+- `generateInsights` runs at `temperature: 0.3` for more deterministic, evidence-grounded output.
 
-**JSON enforcement:** Both calls use system prompts that instruct Claude to respond only in valid JSON. `JSON.parse()` is wrapped in try/catch with a fallback empty object.
+**JSON enforcement & Zod forgiveness:**
+- Both calls use system prompts that instruct Claude to respond only in valid JSON (no prose, no markdown fences).
+- A `stripJsonFences()` helper defensively removes accidental ```` ```json ```` wrappers before parsing.
+- Zod schemas for both `ProfileSchema` and `InsightsSchema` use `z.string().optional().default('Unavailable')` for every field — so a missing or malformed field fills in `"Unavailable"` instead of throwing and nuking the whole row.
+- `generateInsights` uses `safeParse` + logs `result.error.flatten()` and the raw Claude response when validation falls back, so prompt drift is debuggable.
+
+**Prompt quality (latest pass):**
+- `extractProfile` pushes for specificity (e.g. "Vertical SaaS for logistics", not "SaaS"), maturity signals, growth indicators, B2B/B2C classification.
+- `generateInsights` is written as a senior sales strategist brief: every sales angle must cover WHICH pain, WHY now, HOW to open; every risk signal must hit a different category (competitive, market, concentration, funding, platform, regulatory, talent); anti-patterns are called out explicitly in the prompt.
+
+**Missing-news handling (`hasRealNews` flag):**
+- `getNews` returns a synthetic placeholder article (`title: "No recent news found for <company>"`) when GNews returns zero hits — this keeps the downstream shape consistent.
+- `enrichRow` computes `hasRealNews = articles.length > 0 && !articles[0].title.includes("No recent news")` and passes it into `generateInsights`.
+- When `hasRealNews` is false, the prompt explicitly tells Claude to infer from profile + website context instead of saying "no news available", and to suffix `recentNewsSummary` with `" (Based on website analysis and market position)"`. Sales angles and risk signals are still produced in every case.
 
 ---
 
@@ -203,19 +218,19 @@ enrichRow(company) — lib/enrichRow.ts
 
 ---
 
-### D-006a · NewsAPI Wrapper Implementation (`lib/news.ts`)
+### D-006a · GNews Wrapper Implementation (`lib/news.ts`)
 
-**Decision:** Implement `getNews(companyName)` as a thin `fetch`-based wrapper around `https://newsapi.org/v2/everything`, returning only `{ articles: NewsArticle[] }` limited to the 5 most recent articles.
+**Decision:** Implement `getNews(companyName)` as a thin `fetch`-based wrapper around `https://gnews.io/api/v4/search`, returning `{ articles: NewsArticle[] }` limited to 5 recent articles, with retry-on-429 and a synthetic placeholder when no news exists.
 
 **Implementation details:**
-- **No SDK** — plain `fetch()` GET request. Keeps the dependency surface small and avoids any SDK-side retry/transform behavior we don't control.
-- **Query params** built with `URLSearchParams`: `q=companyName`, `sortBy=publishedAt`, `language=en`, `pageSize=5`. Requesting `pageSize=5` at the source avoids pulling the default 100-result payload just to slice it client-side.
-- **Auth via header** (`X-Api-Key`) instead of query string. Keeps the API key out of URLs/logs; NewsAPI accepts both, and the header form is the safer default.
-- **Env var validation** — throws immediately if `NEWS_API_KEY` is missing, so failures surface at call time rather than as a confusing 401 from NewsAPI.
-- **Error propagation** — no internal `try/catch`. Network errors, non-2xx responses, and NewsAPI error payloads (`status !== 'ok'`) all throw. This matches the project-wide pattern where `enrichRow.ts` owns per-step error handling and records which sources succeeded in `Data Sources Used`.
-- **Empty-results handling** — if NewsAPI returns zero articles (common for small/unknown companies), we return `{ articles: [] }` rather than throwing. No news is a valid result, not an error.
-- **Response shape** — only `{ title, publishedAt, description }` per article is returned. `totalResults`, `url`, `source`, `author`, `urlToImage`, and `content` are dropped to keep the payload small for the downstream Claude call in `generateInsights`.
-- **Types exported:** `NewsArticle` (per-article shape) and `NewsResult = { articles: NewsArticle[] }`. `NewsResult` is kept so the existing import in `lib/enrichRow.ts` continues to compile unchanged.
+- **No SDK** — plain `fetch()` GET request. Keeps the dependency surface small.
+- **Query params:** `q=companyName`, `lang=en`, `max=5`, `sortby=publishedAt`, `apikey=GNEWS_API_KEY`.
+- **Env var validation** — throws immediately if `GNEWS_API_KEY` is missing, so failures surface at call time rather than as a confusing 401.
+- **Retry with backoff + jitter (`fetchWithRetry`)** — GNews free tier aggressively rate-limits. The wrapper retries on `429` and `503` with exponential backoff (`base * 2^attempt + random jitter`) up to a small number of attempts before surfacing the error to `enrichRow`.
+- **Error propagation** — no swallowing internal errors. Network errors and non-2xx responses throw; `enrichRow.ts` owns per-step try/catch and records status in `Data Sources Used`.
+- **Empty-results placeholder** — if GNews returns zero articles (common for small/unknown companies), `getNews` returns `{ articles: [noNewsPlaceholder(companyName)] }` where the placeholder is `{ title: "No recent news found for <company>", source: "Claude (backup analysis)", ... }`. Keeps the downstream shape consistent so `generateInsights` always sees an array it can iterate; `enrichRow` detects the placeholder via `hasRealNews` and tells Claude to infer instead.
+- **Response shape** — `{ title, publishedAt, description, source? }` per article. Everything else (url, image, content) is dropped to keep the Claude prompt compact.
+- **Types exported:** `NewsArticle` and `NewsResult = { articles: NewsArticle[] }`. `NewsResult` is preserved so the existing import in `lib/enrichRow.ts` keeps compiling unchanged.
 
 **Why limit to 5 articles:**
 - Claude Call 2 (`generateInsights`) only needs enough recency signal to write a short news summary and inform risk signals — 5 recent articles are sufficient.
@@ -231,7 +246,34 @@ enrichRow(company) — lib/enrichRow.ts
 - A company's website might be down. A news search might return 0 results. An AI call might time out.
 - The user should still receive a CSV — just with that row's fields showing `"Data unavailable"` or the error reason.
 - Each step in `enrichRow.ts` is wrapped in try/catch. Errors are caught, logged to console, and the pipeline continues with whatever data was collected up to that point.
-- `Data Sources Used` column records exactly which sources returned real data, giving full transparency.
+- `Data Sources Used` column records exactly which sources returned real data, giving full transparency (see D-011).
+
+---
+
+### D-011 · `Data Sources Used` — Detailed, Per-Call Audit String
+
+**Decision:** The `Data Sources Used` output column is not just a list of API names; it's a human-readable audit of every external call made for that row, including the specific hosts/URLs touched and per-source success/failure status.
+
+**Format (example):**
+```
+Firecrawl (acme.com), Serper (search results from linkedin.com, crunchbase.com, acme.com), GNews (3 news articles), Claude (2 AI calls)
+```
+
+**Failure-mode examples:**
+```
+Firecrawl (attempted: acme.com - failed), Serper (no results), GNews (no recent news), Claude (profile only)
+```
+
+**Per-source rules (implemented in `lib/enrichRow.ts`):**
+- **Firecrawl** — success: `Firecrawl (<host>)`; empty markdown: `Firecrawl (attempted: <host> - no content)`; thrown error: `Firecrawl (attempted: <host> - failed)`. Host is derived via a small `hostFromUrl()` helper that normalizes missing protocols and strips `www.`.
+- **Serper** — success: `Serper (search results from <host1>, <host2>, <host3>)` using the top 3 unique result hosts; zero results: `Serper (no results)`; thrown error: `Serper (failed)`.
+- **GNews** — success: `GNews (<N> news article[s])` (pluralization handled); placeholder-only (no real news): `GNews (no recent news)`; thrown error: `GNews (failed)`.
+- **Claude** — both calls ok: `Claude (2 AI calls)`; only one succeeded: `Claude (profile only)` or `Claude (insights only)`; both failed: `Claude (failed)`. Tracked via `profileOk` / `insightsOk` booleans set inside the existing try/catch blocks — no extra calls, no changes to error-handling flow.
+
+**Why this shape:**
+- Gives the end user (and us during debugging) a single-column, at-a-glance explanation of exactly where each row's data came from and what was missing — without needing to open server logs.
+- Keeps the existing schema (`Data Sources Used` is one of the required output columns) while making it genuinely useful instead of a static list of API names.
+- Every source string is appended only from inside its own try/catch, so the column always reflects the real outcome of the pipeline for that row.
 
 ---
 
@@ -247,7 +289,7 @@ enrichRow(company) — lib/enrichRow.ts
 ├── lib/
 │   ├── scrape.ts                  # Firecrawl — website content retrieval
 │   ├── search.ts                  # Serper — Google search results
-│   ├── news.ts                    # NewsAPI — recent news
+│   ├── news.ts                    # GNews — recent news (with retry + placeholder)
 │   ├── ai.ts                      # Claude — two-step AI calls
 │   ├── email.ts                   # Resend — email with CSV attachment
 │   └── enrichRow.ts               # Orchestrator — one company end-to-end
@@ -265,7 +307,7 @@ enrichRow(company) — lib/enrichRow.ts
 | `ANTHROPIC_API_KEY` | Anthropic | Claude API access |
 | `FIRECRAWL_API_KEY` | Firecrawl | Website scraping |
 | `SERPER_API_KEY` | Serper.dev | Google search results |
-| `NEWS_API_KEY` | NewsAPI.org | Recent company news |
+| `GNEWS_API_KEY` | GNews.io | Recent company news |
 | `RESEND_API_KEY` | Resend | Email delivery |
 | `RESEND_FROM_EMAIL` | Resend | Verified sender address |
 
@@ -288,6 +330,12 @@ enrichRow(company) — lib/enrichRow.ts
 | 9 | End-to-end testing + bug fixes | — |
 | 10 | `search.ts` implementation + type reconciliation (SearchResult vs SearchResponse) | D-005 |
 | 11 | `ai.ts` implementation (extractProfile + generateInsights with Anthropic SDK + Zod) | D-007 |
+| 12 | Serper 404 fix (correct endpoint `https://google.serper.dev/search`) + Claude model fixes (4xx on deprecated IDs → moved to `claude-haiku-4-5`) | D-005, D-007 |
+| 13 | Migrated `news.ts` from NewsAPI to GNews (`gnews.io/api/v4/search`) with `fetchWithRetry` (exponential backoff + jitter) for 429/503 | D-006, D-006a |
+| 14 | Prompt quality pass — both Claude prompts rewritten: `extractProfile` for specificity/maturity/ICP, `generateInsights` as a senior-sales brief (WHY/HOW, distinct risk categories, anti-patterns); `max_tokens=2048`, `temperature=0.3` for insights | D-007 |
+| 15 | Missing-news graceful path — placeholder article in `news.ts`, `hasRealNews` flag in `enrichRow.ts`, conditional prompt branch in `generateInsights`, Zod schemas made forgiving (`.optional().default('Unavailable')`), raw-response + validation-error logging | D-006a, D-007 |
+| 16 | `Data Sources Used` upgraded to detailed per-call audit with hosts + success/failure (new `hostFromUrl` helper, per-source status strings) | D-011 |
+| 17 | Frontend polish — `app/page.tsx` upload UI + `suppressHydrationWarning` on `<body>` in `app/layout.tsx` to silence browser-extension hydration mismatches | — |
 
 ---
 

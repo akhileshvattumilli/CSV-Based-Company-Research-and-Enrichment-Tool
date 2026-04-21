@@ -34,9 +34,9 @@ interface GNewsResponse {
 const GNEWS_API_URL = 'https://gnews.io/api/v4/search'
 const MAX_ARTICLES = 5
 
-const MAX_RETRIES = 3
-const BASE_DELAY_MS = 600
-const INITIAL_JITTER_MS = 1200
+const MAX_RETRIES = 5
+const BASE_DELAY_MS = 2000
+const INITIAL_JITTER_MS = 5000
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
